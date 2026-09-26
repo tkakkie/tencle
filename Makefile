@@ -65,5 +65,7 @@ zizmor-version:
 	@echo $(ZIZMOR_VERSION)
 
 # 開発環境の構成が壊れていないかを、架空の値（.env.example）で展開して確かめる。
+# シェルの環境変数は --env-file より優先されるので、compose.yaml が使う変数を外してから実行する。
 compose:
-	docker compose -f compose.yaml --env-file .env.example config --quiet
+	env -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB -u POSTGRES_PORT \
+		docker compose -f compose.yaml --env-file .env.example config --quiet
