@@ -12,14 +12,14 @@ ACTIONLINT    := github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 # zizmor は Go 製ではないので、入っている版が一致するかを確かめる。
 ZIZMOR_VERSION := 1.30.1
 
-.PHONY: check check-go check-repository fmt vet build lint test vuln secrets actionlint zizmor zizmor-version
+.PHONY: check check-go check-repository fmt vet build lint test vuln secrets actionlint zizmor zizmor-version compose
 
 # CI のジョブは check-go と check-repository を呼ぶ。検査の組み合わせはここだけで決める。
 check: check-go check-repository
 
 check-go: fmt vet build lint test vuln
 
-check-repository: secrets actionlint zizmor
+check-repository: secrets actionlint zizmor compose
 
 # PATH の gofmt ではなく、選んだ Go に同梱の gofmt を使う。
 fmt:
@@ -63,3 +63,9 @@ zizmor:
 
 zizmor-version:
 	@echo $(ZIZMOR_VERSION)
+
+# 開発環境の構成が壊れていないかを、架空の値（.env.example）で展開して確かめる。
+# シェルの環境変数は --env-file より優先されるので、compose.yaml が使う変数を外してから実行する。
+compose:
+	env -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB -u POSTGRES_PORT \
+		docker compose -f compose.yaml --env-file .env.example config --quiet

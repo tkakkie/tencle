@@ -1,0 +1,24 @@
+# 開発環境。起動は README の手順（cp .env.example .env → docker compose up）で行う。
+services:
+  db:
+    # 版はダイジェストで固定する。タグは付け替えられるため。
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?.env に POSTGRES_USER を書いてください}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env に POSTGRES_PASSWORD を書いてください}
+      POSTGRES_DB: ${POSTGRES_DB:?.env に POSTGRES_DB を書いてください}
+    ports:
+      # 同じネットワークの他の機器から開発用の DB に届かないように、手元にだけ公開する。
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 のイメージは、この下の版ごとのディレクトリにデータを置く。
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      # 初期化の途中はソケットでしか待ち受けないので、TCP で確かめて初期化の完了を待つ。
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  db-data:
