@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gh pr review*)",
+      "Bash(gh auth*)",
+      "Bash(gh repo delete*)",
+      "Bash(gh repo edit*)",
+      "Bash(gh api*rulesets*)",
+      "Bash(*GH_CONFIG_DIR=*)",
+      "Bash(*GH_TOKEN=*)",
+      "Bash(security find-*)",
+      "Bash(security dump-keychain*)"
+    ]
+  }
+}
