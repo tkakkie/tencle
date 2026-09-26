@@ -41,6 +41,6 @@ Actor を記録する各テーブル（監査ログ、`Matter.created_by`、`Act
 
 ## 結果
 
-- スパイクで、テナントの作成（System）・招待の作成（Membership）・受諾（作った Membership）の監査を記録し、受諾の監査の Actor が作った Membership を指すことをテストで確かめた
+- スパイクで、テナントの作成（System、`create-tenant`）・招待の作成（依頼した Membership）・受諾（作った Membership）の監査の行の中身をテストで確かめた
 - Actor を持つテーブルごとに3〜4列と `CHECK` 制約が要る。sqlc のクエリと Go の型の変換は、`internal/authz` の `Actor` 型1か所にまとめる
 - #12（監査ログの基盤）でこの形を使う
