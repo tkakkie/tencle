@@ -34,6 +34,9 @@ Issue・PR・ドキュメントでは、日本語の説明の中で識別子を�
 | `Actor` | 操作者 | 書き込みを行う主体。`Membership` / `Integration` / `System` のいずれか |
 | `System` | システム | ジョブ・CLIによる操作者。文書では「System Actor」とも書く |
 | `Invitation` | 招待 | 管理者が職員をメールで招く仕組み。`priest` 段階では紐付けるPriestを指定する |
+| `AuthToken` | — | 認証トークン。用途（`kind`）は `session`（セッション）・`invitation`（招待）・`password_reset`（パスワード再設定。最初の admin のパスワード設定にも使う）。ハッシュだけを保存する |
+| `credential_version` | — | 認証の世代。パスワードの更新で上がり、それより前に発行したセッションを無効にする |
+| `UserEvent` | — | テナントに属さない、ユーザー単位の出来事（パスワードの変更・再設定など）の記録。本人だけが見える |
 
 ## DBとインフラ
 
