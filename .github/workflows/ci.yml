@@ -20,7 +20,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - run: make fmt vet build lint test vuln
+      - run: make check-go
 
   repository:
     runs-on: ubuntu-24.04
@@ -35,4 +35,4 @@ jobs:
           go-version-file: go.mod
           cache: false
       - run: pipx install "zizmor==$(make -s zizmor-version)"
-      - run: make secrets actionlint zizmor
+      - run: make check-repository

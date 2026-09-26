@@ -12,9 +12,14 @@ ACTIONLINT    := github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 # zizmor は Go 製ではないので、入っている版が一致するかを確かめる。
 ZIZMOR_VERSION := 1.30.1
 
-.PHONY: check fmt vet build lint test vuln secrets actionlint zizmor zizmor-version
+.PHONY: check check-go check-repository fmt vet build lint test vuln secrets actionlint zizmor zizmor-version
 
-check: fmt vet build lint test vuln secrets actionlint zizmor
+# CI のジョブは check-go と check-repository を呼ぶ。検査の組み合わせはここだけで決める。
+check: check-go check-repository
+
+check-go: fmt vet build lint test vuln
+
+check-repository: secrets actionlint zizmor
 
 # PATH の gofmt ではなく、選んだ Go に同梱の gofmt を使う。
 fmt:
