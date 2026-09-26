@@ -12,11 +12,12 @@ BEGIN
 END
 $$;
 -- +goose StatementEnd
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tencle_app;
+-- シーケンスは River のジョブの ID のものだけ（River v0.47 の挿入が nextval を呼ぶ）。
+GRANT USAGE ON SEQUENCE river_job_id_seq TO tencle_app;
 -- テナントの作成と同じトランザクションで、パスワード設定のメールのジョブを入れるため。
 -- River（v0.47）はジョブの挿入で RETURNING と ON CONFLICT (unique_key) DO UPDATE SET kind を使うので、SELECT と kind の UPDATE も要る。
 GRANT SELECT, INSERT, UPDATE (kind) ON river_job TO tencle_tenant_creator;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tencle_tenant_creator;
+GRANT USAGE ON SEQUENCE river_job_id_seq TO tencle_tenant_creator;
 
 -- +goose Down
 SELECT 1;

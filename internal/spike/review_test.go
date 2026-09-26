@@ -407,3 +407,91 @@ func TestPasswordSetupJobSkipsWhenSet(t *testing.T) {
 		t.Fatalf("トークンを発行した: %d", n)
 	}
 }
+
+// パスワードの更新で、未使用のパスワード再設定のトークンもすべて失効する。発行のときも前のトークンを失効させる。
+func TestPasswordResetTokensRevoked(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	_, userID := a.newTenant(t, "a", "admin@example.test")
+	issue := func() string {
+		t.Helper()
+		var token string
+		err := pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
+			var err error
+			token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, userID, userID, time.Now().Add(time.Hour))
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	first := issue()
+	second := issue()
+	if err := a.id.ResetPassword(ctx, first, "x"); !errors.Is(err, identity.ErrInvalidToken) {
+		t.Fatalf("前に発行したトークン: %v", err)
+	}
+	if err := a.id.ResetPassword(ctx, second, "new"); err != nil {
+		t.Fatal(err)
+	}
+	// 別の経路でパスワードが更新されたら、発行済みの再設定のトークンは使えない。
+	third := issue()
+	if _, err := a.app.Exec(ctx, `SELECT fn_update_password($1, $2)`, userID, "changed-elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.id.ResetPassword(ctx, third, "x"); !errors.Is(err, identity.ErrInvalidToken) {
+		t.Fatalf("パスワードの更新の後のトークン: %v", err)
+	}
+}
+
+// 未設定・パスワード違い・存在しないメールアドレスのどれでも、同じエラーで、argon2id の検証を通る。
+func TestLoginTimingIsUniform(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	a.newTenant(t, "a", "admin@example.test")
+	// パスワードを設定していない User（別テナントの作成で作り、メールは使わない）。
+	if _, err := tenancy.Create(ctx, a.env.creator, a.creatorJobs, "b", "b", "unset@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, email := range []string{"unset@example.test", "admin@example.test", "nobody@example.test"} {
+		start := time.Now()
+		_, _, err := a.id.Login(ctx, email, "wrong")
+		d := time.Since(start)
+		if !errors.Is(err, identity.ErrInvalidCredentials) {
+			t.Errorf("%s: %v", email, err)
+		}
+		// argon2id（19 MiB、反復2）の検証は数ミリ秒以上かかる。即座に失敗していれば検証を飛ばしている。
+		if d < 3*time.Millisecond {
+			t.Errorf("%s: %v で終わった（検証を飛ばしている）", email, d)
+		}
+	}
+}
+
+// 取り消した招待は、未使用のトークンでも受諾できない。
+func TestRevokedInvitationCannotBeAccepted(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	admin, adminUser := a.newTenant(t, "a", "admin@example.test")
+	inv, err := tenancy.Invite(ctx, a.app, a.jobs, admin, adminUser, "late@example.test", identity.LevelOffice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := a.sender.token(t, "late@example.test")
+	err = db.TenantTx(ctx, a.app, admin.TenantID, adminUser, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE invitations SET status = 'revoked' WHERE id = $1`, inv)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.id.AcceptInvitation(ctx, token, "pw", uuid.Nil()); !errors.Is(err, identity.ErrInvalidToken) {
+		t.Fatalf("取り消した招待の受諾: %v", err)
+	}
+	// 監査の Actor：テナントの作成は System（create-tenant）、招待の作成は依頼した Membership。
+	if n := count(t, ctx, a.superuser, `SELECT count(*) FROM audit_logs WHERE action = 'tenant.created' AND actor_kind = 'system' AND actor_system = 'create-tenant' AND actor_membership_id IS NULL`); n != 1 {
+		t.Errorf("テナントの作成の Actor: %d", n)
+	}
+	if n := count(t, ctx, a.superuser, `SELECT count(*) FROM audit_logs WHERE action = 'invitation.created' AND target_id = '`+inv.String()+`' AND actor_kind = 'membership' AND actor_membership_id = '`+admin.MembershipID.String()+`'`); n != 1 {
+		t.Errorf("招待の作成の Actor: %d", n)
+	}
+}

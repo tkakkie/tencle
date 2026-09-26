@@ -45,7 +45,7 @@ func Create(ctx context.Context, pool *pgxpool.Pool, jobs *river.Client[pgx.Tx],
 		case errors.Is(err, pgx.ErrNoRows):
 			userID, newUser = uuid.New(), true
 			// パスワードは、メールのトークンで本人が設定するまで使えない値にしておく。
-			if _, err := tx.Exec(ctx, `INSERT INTO users (id, email, hashed_password) VALUES ($1, $2, '!')`, userID, adminEmail); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO users (id, email, hashed_password) VALUES ($1, $2, $3)`, userID, adminEmail, identity.UnusablePasswordHash()); err != nil {
 				return fmt.Errorf("User の作成: %w", err)
 			}
 		case err != nil:

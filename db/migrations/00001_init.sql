@@ -22,9 +22,11 @@ CREATE TABLE tenants (
 
 CREATE TABLE users (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- 正規化したメールアドレス（小文字化など）。
-    email             text NOT NULL UNIQUE,
+    -- 正規化したメールアドレス。正規化した値だけを保存するので、一意制約もその値に掛かる。
+    email             text NOT NULL UNIQUE CHECK (email = lower(btrim(email))),
+    -- パスワードを設定する前も、使えない本物の argon2id のハッシュを入れる（ログインの所要時間で有無が分からないように）。
     hashed_password   text NOT NULL,
+    password_set_at   timestamptz,
     -- 認証の世代。パスワードの更新で1つ上げる。セッションは発行時の世代と一致するときだけ有効（ログインと更新の競合で古いセッションが残らないように）。
     credential_version integer NOT NULL DEFAULT 0,
     email_verified_at timestamptz,
@@ -57,7 +59,7 @@ CREATE UNIQUE INDEX temples_one_own_per_tenant ON temples (tenant_id) WHERE kind
 CREATE TABLE invitations (
     tenant_id    uuid NOT NULL REFERENCES tenants (id),
     id           uuid NOT NULL DEFAULT gen_random_uuid(),
-    email        text NOT NULL,
+    email        text NOT NULL CHECK (email = lower(btrim(email))),
     access_level text NOT NULL CHECK (access_level IN ('admin', 'office', 'priest')),
     status       text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'revoked')),
     expires_at   timestamptz NOT NULL,
@@ -180,14 +182,14 @@ GRANT INSERT ON tenants, temples, memberships, audit_logs TO tencle_tenant_creat
 GRANT INSERT (id, email, hashed_password) ON users TO tencle_tenant_creator;
 
 -- 例外関数の所有ロールの権限。例外関数の表の「読む」「書く」列だけ。
-GRANT SELECT (id, email, hashed_password, credential_version, email_verified_at) ON users TO tencle_fn_reader;
+GRANT SELECT (id, email, hashed_password, credential_version, password_set_at, email_verified_at) ON users TO tencle_fn_reader;
 GRANT SELECT (id, slug, name) ON tenants TO tencle_fn_reader;
 GRANT SELECT (id, tenant_id, user_id, access_level, active) ON memberships TO tencle_fn_reader;
 GRANT SELECT (id, tenant_id, email, access_level, status, expires_at) ON invitations TO tencle_fn_reader;
 GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at, credential_version) ON auth_tokens TO tencle_fn_reader;
 GRANT SELECT (id, email, credential_version) ON users TO tencle_fn_writer;
-GRANT INSERT (email, hashed_password, email_verified_at) ON users TO tencle_fn_writer;
-GRANT UPDATE (hashed_password, credential_version) ON users TO tencle_fn_writer;
+GRANT INSERT (email, hashed_password, password_set_at, email_verified_at) ON users TO tencle_fn_writer;
+GRANT UPDATE (hashed_password, credential_version, password_set_at) ON users TO tencle_fn_writer;
 GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
 GRANT INSERT (token_hash, kind, subject_id, user_id, expires_at, credential_version) ON auth_tokens TO tencle_fn_writer;
 GRANT UPDATE (consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
@@ -211,7 +213,7 @@ AS $$ SELECT u.id FROM users u WHERE u.email = p_email $$;
 -- パスワード設定のメールのジョブが、処理の時点でまだ未設定かを確かめられるように、設定済みかどうかも返す（ハッシュは返さない）。
 CREATE FUNCTION fn_user_email(p_user_id uuid, OUT email text, OUT password_set boolean)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
-AS $$ SELECT u.email, u.hashed_password <> '!' FROM users u WHERE u.id = p_user_id $$;
+AS $$ SELECT u.email, u.password_set_at IS NOT NULL FROM users u WHERE u.id = p_user_id $$;
 
 CREATE FUNCTION fn_invitation_lookup(p_invitation_id uuid,
     OUT tenant_id uuid, OUT status text, OUT expires_at timestamptz, OUT email text, OUT access_level text)
@@ -240,7 +242,13 @@ $$;
 CREATE FUNCTION fn_auth_token_save(p_token_hash bytea, p_kind text, p_subject_id uuid, p_user_id uuid, p_expires_at timestamptz, p_credential_version integer)
 RETURNS void
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
-AS $$ INSERT INTO auth_tokens (token_hash, kind, subject_id, user_id, expires_at, credential_version) VALUES (p_token_hash, p_kind, p_subject_id, p_user_id, p_expires_at, p_credential_version) $$;
+AS $$
+    -- パスワード再設定のトークンは、同じ User に対して常に1つだけ有効にする（前のものを失効させる）。
+    UPDATE auth_tokens SET revoked_at = now()
+    WHERE p_kind = 'password_reset' AND kind = 'password_reset' AND subject_id = p_subject_id
+      AND consumed_at IS NULL AND revoked_at IS NULL;
+    INSERT INTO auth_tokens (token_hash, kind, subject_id, user_id, expires_at, credential_version) VALUES (p_token_hash, p_kind, p_subject_id, p_user_id, p_expires_at, p_credential_version);
+$$;
 
 -- 1回だけ成立する（未消費かつ期限内の行だけを更新する）。
 CREATE FUNCTION fn_auth_token_consume(p_token_hash bytea, p_kind text) RETURNS uuid
@@ -259,13 +267,15 @@ AS $$ UPDATE auth_tokens SET revoked_at = now() WHERE user_id = p_user_id AND ki
 CREATE FUNCTION fn_update_password(p_user_id uuid, p_hashed_password text) RETURNS void
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$
-    UPDATE users SET hashed_password = p_hashed_password, credential_version = credential_version + 1 WHERE id = p_user_id;
-    UPDATE auth_tokens SET revoked_at = now() WHERE user_id = p_user_id AND kind = 'session' AND revoked_at IS NULL;
+    UPDATE users SET hashed_password = p_hashed_password, credential_version = credential_version + 1, password_set_at = now() WHERE id = p_user_id;
+    -- セッションと、未使用のパスワード再設定のトークンをすべて失効させる。
+    UPDATE auth_tokens SET revoked_at = now()
+    WHERE user_id = p_user_id AND kind IN ('session', 'password_reset') AND consumed_at IS NULL AND revoked_at IS NULL;
 $$;
 
 CREATE FUNCTION fn_create_user_by_invitation(p_email text, p_hashed_password text) RETURNS uuid
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
-AS $$ INSERT INTO users (email, hashed_password, email_verified_at) VALUES (p_email, p_hashed_password, now()) RETURNING id $$;
+AS $$ INSERT INTO users (email, hashed_password, password_set_at, email_verified_at) VALUES (p_email, p_hashed_password, now(), now()) RETURNING id $$;
 
 -- 権限は所有者を付け替える前に設定する。付け替えた後は、マイグレーション用ロールは所有者でなくなり、
 -- REVOKE・GRANT が警告だけで効かなくなるため（スパイクで見つけた）。

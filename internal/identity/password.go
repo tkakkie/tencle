@@ -19,8 +19,12 @@ const (
 	argonSaltLen = 16
 )
 
-// unusablePassword は、パスワードをまだ設定していない User の hashed_password。どのパスワードとも一致しない。
-const unusablePassword = "!"
+// UnusablePasswordHash は、パスワードをまだ設定していない User に保存するハッシュ。乱数のパスワードの本物の argon2id の
+// ハッシュなので、どのパスワードとも一致せず、ログインの検証に他と同じ時間がかかる（I-34）。
+func UnusablePasswordHash() string {
+	token, _ := newToken()
+	return hashPassword(token)
+}
 
 // dummyHash は、存在しないメールアドレスでも検証に同じ時間をかけるための値（I-34）。
 var dummyHash = hashPassword("dummy-password-for-timing")
