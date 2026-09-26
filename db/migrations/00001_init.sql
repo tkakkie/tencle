@@ -173,7 +173,7 @@ GRANT SELECT, INSERT ON audit_logs, user_events TO tencle_app;
 GRANT SELECT (id, slug) ON tenants TO tencle_tenant_creator;
 GRANT SELECT (id, email) ON users TO tencle_tenant_creator;
 GRANT INSERT ON tenants, temples, memberships, audit_logs TO tencle_tenant_creator;
-GRANT INSERT (email, hashed_password) ON users TO tencle_tenant_creator;
+GRANT INSERT (id, email, hashed_password) ON users TO tencle_tenant_creator;
 
 -- 例外関数の所有ロールの権限。例外関数の表の「読む」「書く」列だけ。
 GRANT SELECT (id, email, hashed_password, email_verified_at) ON users TO tencle_fn_reader;
