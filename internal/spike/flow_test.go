@@ -335,7 +335,7 @@ func TestSessions(t *testing.T) {
 		var token string
 		err = pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
 			var err error
-			token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, adminUser, adminUser, time.Now().Add(time.Hour))
+			token, err = issueReset(ctx, a, tx, adminUser)
 			return err
 		})
 		if err != nil {

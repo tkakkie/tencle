@@ -70,7 +70,8 @@ func (w *PasswordSetupWorker) Work(ctx context.Context, job *river.Job[PasswordS
 	err := pgx.BeginFunc(ctx, w.Identity.Pool, func(tx pgx.Tx) error {
 		var email *string
 		var set *bool
-		if err := tx.QueryRow(ctx, `SELECT email, password_set FROM fn_user_email($1)`, job.Args.UserID).Scan(&email, &set); err != nil {
+		var version *int32
+		if err := tx.QueryRow(ctx, `SELECT email, password_set, credential_version FROM fn_user_email($1)`, job.Args.UserID).Scan(&email, &set, &version); err != nil {
 			return fmt.Errorf("宛先の取得: %w", err)
 		}
 		// 処理の時点で、User がないか、既にパスワードを設定していれば送らない（遅れて実行・再試行されたジョブで、
@@ -81,7 +82,8 @@ func (w *PasswordSetupWorker) Work(ctx context.Context, job *river.Job[PasswordS
 		}
 		to = *email
 		var err error
-		token, err = w.Identity.IssueToken(ctx, tx, identity.TokenPasswordReset, job.Args.UserID, job.Args.UserID, time.Now().Add(72*time.Hour))
+		// 判断に使った世代でトークンを発行する。この後でパスワードが設定されれば、トークンは使えなくなる。
+		token, err = w.Identity.IssuePasswordResetToken(ctx, tx, job.Args.UserID, *version, time.Now().Add(72*time.Hour))
 		return err
 	})
 	if err != nil {
@@ -134,7 +136,7 @@ func (w *InvitationWorker) Work(ctx context.Context, job *river.Job[InvitationAr
 		}
 		allowed = true
 		// トークンの期限は招待の期限と同じにする（ADR 0004）。
-		token, err = w.Identity.IssueToken(ctx, tx, identity.TokenInvitation, a.InvitationID, uuid.Nil(), expires)
+		token, err = w.Identity.IssueInvitationToken(ctx, tx, a.InvitationID, expires)
 		return err
 	})
 	if err != nil {

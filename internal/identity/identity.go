@@ -53,7 +53,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var hashed string
 		var version int32
-		err := tx.QueryRow(ctx, `SELECT user_id, hashed_password, credential_version FROM fn_login_lookup($1) WHERE user_id IS NOT NULL`, NormalizeEmail(email)).Scan(&userID, &hashed, &version)
+		var passwordSet bool
+		err := tx.QueryRow(ctx, `SELECT user_id, hashed_password, credential_version, password_set FROM fn_login_lookup($1) WHERE user_id IS NOT NULL`, NormalizeEmail(email)).Scan(&userID, &hashed, &version, &passwordSet)
 		if errors.Is(err, pgx.ErrNoRows) {
 			verifyPassword(dummyHash, password)
 			return ErrInvalidCredentials
@@ -61,7 +62,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 		if err != nil {
 			return fmt.Errorf("ログインの照合: %w", err)
 		}
-		if !verifyPassword(hashed, password) {
+		// 検証は常に行ってから判定する（未設定の User でも所要時間を揃える）。未設定の User はログインさせない。
+		if !verifyPassword(hashed, password) || !passwordSet {
 			return ErrInvalidCredentials
 		}
 		if s.LoginHook != nil {
@@ -93,12 +95,15 @@ func (s *Service) Logout(ctx context.Context, userID uuid.UUID) error {
 	return err
 }
 
-// IssueToken は、メール送信ジョブがトークンを発行するときに使う（I-10）。セッションはログインでだけ発行する。
-func (s *Service) IssueToken(ctx context.Context, tx pgx.Tx, kind TokenKind, subjectID, userID uuid.UUID, expires time.Time) (string, error) {
-	if kind == TokenSession {
-		return "", errors.New("identity: セッションはログインでだけ発行する")
-	}
-	return s.issue(ctx, tx, kind, subjectID, userID, expires, nil)
+// IssueInvitationToken は、招待のメールのジョブがトークンを発行するときに使う（I-10）。
+func (s *Service) IssueInvitationToken(ctx context.Context, tx pgx.Tx, invitationID uuid.UUID, expires time.Time) (string, error) {
+	return s.issue(ctx, tx, TokenInvitation, invitationID, uuid.Nil(), expires, nil)
+}
+
+// IssuePasswordResetToken は、パスワード再設定のトークンを発行する。version は、呼び出し側が「発行してよい」と
+// 判断したときに読んだ User の認証の世代。その後でパスワードが更新されていれば、このトークンは使えない。
+func (s *Service) IssuePasswordResetToken(ctx context.Context, tx pgx.Tx, userID uuid.UUID, version int32, expires time.Time) (string, error) {
+	return s.issue(ctx, tx, TokenPasswordReset, userID, userID, expires, &version)
 }
 
 func (s *Service) issue(ctx context.Context, tx pgx.Tx, kind TokenKind, subjectID, userID uuid.UUID, expires time.Time, version *int32) (string, error) {

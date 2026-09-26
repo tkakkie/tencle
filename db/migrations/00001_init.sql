@@ -75,7 +75,7 @@ CREATE TABLE auth_tokens (
     kind        text NOT NULL CHECK (kind IN ('session', 'invitation', 'password_reset')),
     -- 招待なら招待のID、パスワード再設定とセッションなら User のID。
     subject_id  uuid NOT NULL,
-    -- セッションの発行時の User の認証の世代。セッション以外は NULL。
+    -- セッションとパスワード再設定の発行時に確かめた、User の認証の世代。招待は NULL。
     credential_version integer,
     -- セッションとパスワード再設定の持ち主。招待では受諾まで User がないので NULL。
     user_id     uuid REFERENCES users (id),
@@ -84,6 +84,10 @@ CREATE TABLE auth_tokens (
     revoked_at  timestamptz,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- 有効なパスワード再設定のトークンは User ごとに1つだけ（同時の発行でも2つ残らないように）。
+CREATE UNIQUE INDEX auth_tokens_one_active_reset ON auth_tokens (subject_id)
+    WHERE kind = 'password_reset' AND consumed_at IS NULL AND revoked_at IS NULL;
 
 -- 縦断の確認用のテナント所有テーブル。作成者は User ではなく Membership（Actor）で表す（I-4）。
 CREATE TABLE notes (
@@ -190,7 +194,7 @@ GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, re
 GRANT SELECT (id, email, credential_version) ON users TO tencle_fn_writer;
 GRANT INSERT (email, hashed_password, password_set_at, email_verified_at) ON users TO tencle_fn_writer;
 GRANT UPDATE (hashed_password, credential_version, password_set_at) ON users TO tencle_fn_writer;
-GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
+GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at, credential_version) ON auth_tokens TO tencle_fn_writer;
 GRANT INSERT (token_hash, kind, subject_id, user_id, expires_at, credential_version) ON auth_tokens TO tencle_fn_writer;
 GRANT UPDATE (consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
 
@@ -198,9 +202,9 @@ GRANT UPDATE (consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
 -- search_path を固定し、PUBLIC からの実行権限を外してアプリ用ロールだけに与える（I-1）。
 -- pg_temp は省略すると一時スキーマが最初に検索され、一時テーブルで参照先を差し替えられるので、最後に明示する。
 
-CREATE FUNCTION fn_login_lookup(p_email text, OUT user_id uuid, OUT hashed_password text, OUT credential_version integer)
+CREATE FUNCTION fn_login_lookup(p_email text, OUT user_id uuid, OUT hashed_password text, OUT credential_version integer, OUT password_set boolean)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
-AS $$ SELECT u.id, u.hashed_password, u.credential_version FROM users u WHERE u.email = p_email $$;
+AS $$ SELECT u.id, u.hashed_password, u.credential_version, u.password_set_at IS NOT NULL FROM users u WHERE u.email = p_email $$;
 
 CREATE FUNCTION fn_tenant_by_slug(p_slug text) RETURNS uuid
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
@@ -211,9 +215,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 AS $$ SELECT u.id FROM users u WHERE u.email = p_email $$;
 
 -- パスワード設定のメールのジョブが、処理の時点でまだ未設定かを確かめられるように、設定済みかどうかも返す（ハッシュは返さない）。
-CREATE FUNCTION fn_user_email(p_user_id uuid, OUT email text, OUT password_set boolean)
+CREATE FUNCTION fn_user_email(p_user_id uuid, OUT email text, OUT password_set boolean, OUT credential_version integer)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
-AS $$ SELECT u.email, u.password_set_at IS NOT NULL FROM users u WHERE u.id = p_user_id $$;
+AS $$ SELECT u.email, u.password_set_at IS NOT NULL, u.credential_version FROM users u WHERE u.id = p_user_id $$;
 
 CREATE FUNCTION fn_invitation_lookup(p_invitation_id uuid,
     OUT tenant_id uuid, OUT status text, OUT expires_at timestamptz, OUT email text, OUT access_level text)
@@ -235,7 +239,7 @@ AS $$
     SELECT a.subject_id, a.user_id FROM auth_tokens a
     WHERE a.token_hash = p_token_hash AND a.kind = p_kind
       AND a.consumed_at IS NULL AND a.revoked_at IS NULL AND a.expires_at > now()
-      AND (a.kind <> 'session'
+      AND (a.kind NOT IN ('session', 'password_reset')
            OR a.credential_version = (SELECT u.credential_version FROM users u WHERE u.id = a.user_id))
 $$;
 
@@ -254,10 +258,13 @@ $$;
 CREATE FUNCTION fn_auth_token_consume(p_token_hash bytea, p_kind text) RETURNS uuid
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$
-    UPDATE auth_tokens SET consumed_at = now()
-    WHERE token_hash = p_token_hash AND kind = p_kind
-      AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > now()
-    RETURNING subject_id
+    UPDATE auth_tokens a SET consumed_at = now()
+    WHERE a.token_hash = p_token_hash AND a.kind = p_kind
+      AND a.consumed_at IS NULL AND a.revoked_at IS NULL AND a.expires_at > now()
+      -- パスワード再設定は、発行時に確かめた世代が今の世代と一致するときだけ（発行の後にパスワードが更新されていれば使えない）。
+      AND (a.kind <> 'password_reset'
+           OR a.credential_version = (SELECT u.credential_version FROM users u WHERE u.id = a.user_id))
+    RETURNING a.subject_id
 $$;
 
 CREATE FUNCTION fn_revoke_user_sessions(p_user_id uuid) RETURNS void

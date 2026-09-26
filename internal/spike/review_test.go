@@ -134,7 +134,7 @@ func TestLoginRacesPasswordReset(t *testing.T) {
 	var token string
 	err := pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
 		var err error
-		token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, userID, userID, time.Now().Add(time.Hour))
+		token, err = issueReset(ctx, a, tx, userID)
 		return err
 	})
 	if err != nil {
@@ -237,7 +237,7 @@ func TestRollbackAndRetry(t *testing.T) {
 		var token string
 		err = pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
 			var err error
-			token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, adminUser, adminUser, time.Now().Add(time.Hour))
+			token, err = issueReset(ctx, a, tx, adminUser)
 			return err
 		})
 		if err != nil {
@@ -418,7 +418,7 @@ func TestPasswordResetTokensRevoked(t *testing.T) {
 		var token string
 		err := pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
 			var err error
-			token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, userID, userID, time.Now().Add(time.Hour))
+			token, err = issueReset(ctx, a, tx, userID)
 			return err
 		})
 		if err != nil {
@@ -493,5 +493,41 @@ func TestRevokedInvitationCannotBeAccepted(t *testing.T) {
 	}
 	if n := count(t, ctx, a.superuser, `SELECT count(*) FROM audit_logs WHERE action = 'invitation.created' AND target_id = '`+inv.String()+`' AND actor_kind = 'membership' AND actor_membership_id = '`+admin.MembershipID.String()+`'`); n != 1 {
 		t.Errorf("招待の作成の Actor: %d", n)
+	}
+}
+
+// issueReset は、今の認証の世代を読んでからパスワード再設定のトークンを発行する（本番ではメールのジョブが行う）。
+func issueReset(ctx context.Context, a *app, tx pgx.Tx, userID uuid.UUID) (string, error) {
+	var version int32
+	if err := tx.QueryRow(ctx, `SELECT credential_version FROM fn_user_email($1)`, userID).Scan(&version); err != nil {
+		return "", err
+	}
+	return a.id.IssuePasswordResetToken(ctx, tx, userID, version, time.Now().Add(time.Hour))
+}
+
+// 発行してよいと判断した後・トークンを保存する前にパスワードが更新されたら、そのトークンは使えない。
+func TestResetTokenIssuedAcrossPasswordUpdate(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	_, userID := a.newTenant(t, "a", "admin@example.test")
+	var token string
+	err := pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
+		var version int32
+		if err := tx.QueryRow(ctx, `SELECT credential_version FROM fn_user_email($1)`, userID).Scan(&version); err != nil {
+			return err
+		}
+		// 判断の後に、別の接続でパスワードが更新されてコミットされる。
+		if _, err := a.app.Exec(ctx, `SELECT fn_update_password($1, $2)`, userID, "changed"); err != nil {
+			return err
+		}
+		var err error
+		token, err = a.id.IssuePasswordResetToken(ctx, tx, userID, version, time.Now().Add(time.Hour))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.id.ResetPassword(ctx, token, "x"); !errors.Is(err, identity.ErrInvalidToken) {
+		t.Fatalf("更新の前の世代のトークン: %v", err)
 	}
 }
