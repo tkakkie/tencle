@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - exhaustive
+    - gosec
+    - noctx
+    - nolintlint
+  settings:
+    # 列挙の switch は、default があっても全ケースを書かせる（AGENTS.md）。
+    exhaustive:
+      default-signifies-exhaustive: false
+    # 抑制には、対象の linter と理由を必ず書かせる。
+    nolintlint:
+      require-explanation: true
+      require-specific: true
