@@ -19,7 +19,7 @@
 - Go 側は `internal/platform/db` の3つの関数だけで文脈を扱う
   - `TenantTx(ctx, pool, tenantID, userID, fn)`：テナント所有データへのクエリはこの中でだけ実行する
   - `UserTx(ctx, pool, userID, fn)`：テナントを確定する前（ログイン済み・テナントなしのルート）
-  - `SetContext(ctx, tx, tenantID, userID)`：実行中のトランザクションの文脈を設定し直す。招待の受諾とパスワード再設定のように、例外関数で始めた処理を**同じトランザクションのまま**テナント文脈に切り替えるときにだけ使う。呼び出し元は認証モジュールに限り、自作の静的解析で検査する
+  - `SetContext(ctx, tx, tenantID, userID)`：実行中のトランザクションの文脈を設定し直す。例外関数で始めた処理を**同じトランザクションのまま**、招待の受諾ではテナント文脈に、パスワード再設定ではユーザー文脈に切り替えるときにだけ使う。呼び出し元は認証モジュールに限り、自作の静的解析で検査する
 - ポリシーは、テナント所有のテーブルでは `USING` と `WITH CHECK` の両方を `tenant_id = app_tenant_id()` にする。`users` は「自分か、現テナントの所属者」、`auth_tokens` は「自分のもの」だけを見せる
 
 ### DB ロールと作成手順
@@ -37,9 +37,9 @@
 
 ### 例外関数
 
-- 名前は `fn_` で始め、`LANGUAGE sql`・`SECURITY DEFINER`・`SET search_path = pg_catalog, public` とする
+- 名前は `fn_` で始め、`LANGUAGE sql`・`SECURITY DEFINER`・`SET search_path = pg_catalog, public, pg_temp` とする。`pg_temp` を省略すると一時スキーマが最初に検索され、一時テーブルで参照先を差し替えられる（PostgreSQL の公式文書）ので、最後に明示する。スキーマ `public` にはマイグレーション用ロールしか `CREATE` を持たない（アプリ用ロールには与えない）
 - 所有者は、読み取りだけなら `tencle_fn_reader`、書き込みを伴うなら `tencle_fn_writer` にする。所有ロールには、例外関数の表の「読む」「書く」列だけの権限を与える
-- 該当がないとき、`OUT` 引数の関数は **`NULL` の行**を返す。呼び出し側は `WHERE <列> IS NOT NULL` で絞るか、ポインタで受ける
+- 該当がないとき、`OUT` 引数の関数は **`NULL` の行**を、スカラーを返す関数は `NULL` を返す。呼び出し側のクエリは `WHERE <列> IS NOT NULL` で絞り、「該当なし」を `pgx.ErrNoRows` として受ける（sqlc の生成コードでも同じ形で確かめた）
 - マイグレーションの書き方で、スパイクで見つかった2つの落とし穴を避ける
   1. **権限（`REVOKE ... FROM PUBLIC`・`GRANT`）は、所有者を付け替える前に設定する。** 付け替えた後はマイグレーション用ロールが所有者でなくなり、`REVOKE`・`GRANT` が警告だけで効かない。スパイクでは、そのせいで `PUBLIC` が例外関数を実行できる状態になっていた
   2. **所有者を付け替えるには、新しい所有者がスキーマの `CREATE` 権限を持つ必要がある**（PostgreSQL の仕様）。付け替えの間だけ与えて、終わったら取り消す
@@ -52,8 +52,8 @@
 ### River
 
 - River のテーブルは RLS の対象外で、個人情報を入れない（I-20）。River のマイグレーション（`rivermigrate`）を tencle のマイグレーション（goose）より先に、同じマイグレーション用ロールで適用する。River のテーブルへの権限を tencle のマイグレーションで与えるためである
-- アプリ用ロールには River のテーブルの `SELECT`・`INSERT`・`UPDATE`・`DELETE` を与える
-- テナント作成用ロールには、同じトランザクションでジョブを入れるために `river_job` の `SELECT`・`INSERT`・`UPDATE (kind)` を与える。River（v0.47）のジョブの挿入は `RETURNING` と `ON CONFLICT (unique_key) DO UPDATE SET kind` を使うためである。River を更新するときは、この前提が変わっていないかを確かめる
+- アプリ用ロールには River のテーブルの `SELECT`・`INSERT`・`UPDATE`・`DELETE` と、シーケンスの `USAGE` を与える
+- テナント作成用ロールには、同じトランザクションでジョブを入れるために `river_job` の `SELECT`・`INSERT`・`UPDATE (kind)` と、そのシーケンスの `USAGE` を与える（権限の範囲は[DB ロール](../architecture/invariants.md#dbロール)の表を正とする）。River（v0.47）のジョブの挿入は `nextval`・`RETURNING`・`ON CONFLICT (unique_key) DO UPDATE SET kind` を使うためである。River を更新するときは、この前提が変わっていないかを確かめる
 
 ### ID と sqlc
 
@@ -71,10 +71,10 @@
 | RLS の有無 | 対象の各テーブルで RLS が有効かつ強制（`pg_class`） |
 | 文脈なし | 文脈を設定しない接続では、どのテーブルも0行 |
 | 自テナントだけ | 別テナントの行は読めず、書き込みは RLS の違反、更新は0行 |
-| 文脈が漏れない | 接続を1本にしたプールで、コミット・ロールバックの後に文脈が残らない |
-| `users`・`auth_tokens` | 自分と現テナントの所属者だけ、自分のトークンだけが見える |
+| 文脈が漏れない | 接続を1本にしたプールで、コミット・ロールバックの後にテナント文脈もユーザー文脈も残らない |
+| `users`・`auth_tokens`・`user_events` | テナント文脈では自分と同じテナントの別の User が見え、別テナントの User は見えない。テナントなしの文脈では自分だけ。トークンと `user_events` は自分のものだけ。`fn_my_memberships` は自分の所属だけを返す |
 | 秘密の列 | `hashed_password`・`token_hash` は権限なしで読めない |
-| 例外関数 | 所有者・`SECURITY DEFINER`・`search_path`・`PUBLIC` が実行できないこと・アプリ用ロールが実行できること |
+| 例外関数 | 所有者・`SECURITY DEFINER`・`search_path`・`PUBLIC` が実行できないこと・アプリ用ロールが実行できること。同じ名前の一時テーブルを作っても参照先が変わらないこと |
 | テナントの作成 | アプリ用ロールでは作れない |
 
 ## 検討した代わりの案
