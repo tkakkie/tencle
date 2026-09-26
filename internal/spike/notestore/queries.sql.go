@@ -11,6 +11,22 @@ import (
 	"uuid"
 )
 
+const consumeToken = `-- name: ConsumeToken :one
+SELECT subject_id::uuid FROM (SELECT fn_auth_token_consume($1, $2) AS subject_id) c WHERE c.subject_id IS NOT NULL
+`
+
+type ConsumeTokenParams struct {
+	PTokenHash []byte
+	PKind      string
+}
+
+func (q *Queries) ConsumeToken(ctx context.Context, arg ConsumeTokenParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, consumeToken, arg.PTokenHash, arg.PKind)
+	var subject_id uuid.UUID
+	err := row.Scan(&subject_id)
+	return subject_id, err
+}
+
 const createNote = `-- name: CreateNote :one
 INSERT INTO notes (tenant_id, body, created_by_membership_id)
 VALUES (app_tenant_id(), $1, $2)
@@ -58,13 +74,31 @@ func (q *Queries) ListNotes(ctx context.Context) ([]ListNotesRow, error) {
 	return items, nil
 }
 
-const tenantBySlug = `-- name: TenantBySlug :one
-SELECT fn_tenant_by_slug($1)::uuid AS tenant_id
+const loginLookup = `-- name: LoginLookup :one
+SELECT user_id::uuid, hashed_password::text, credential_version::integer FROM fn_login_lookup($1) WHERE user_id IS NOT NULL
 `
 
+type LoginLookupRow struct {
+	UserID            uuid.UUID
+	HashedPassword    string
+	CredentialVersion int32
+}
+
+func (q *Queries) LoginLookup(ctx context.Context, pEmail string) (LoginLookupRow, error) {
+	row := q.db.QueryRow(ctx, loginLookup, pEmail)
+	var i LoginLookupRow
+	err := row.Scan(&i.UserID, &i.HashedPassword, &i.CredentialVersion)
+	return i, err
+}
+
+const tenantBySlug = `-- name: TenantBySlug :one
+SELECT t.tenant_id::uuid FROM (SELECT fn_tenant_by_slug($1) AS tenant_id) t WHERE t.tenant_id IS NOT NULL
+`
+
+// 例外関数は該当がないと NULL を返すので、行を返さない形にして pgx.ErrNoRows で受ける。
 func (q *Queries) TenantBySlug(ctx context.Context, pSlug string) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, tenantBySlug, pSlug)
-	var tenant_id uuid.UUID
-	err := row.Scan(&tenant_id)
-	return tenant_id, err
+	var t_tenant_id uuid.UUID
+	err := row.Scan(&t_tenant_id)
+	return t_tenant_id, err
 }

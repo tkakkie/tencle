@@ -15,20 +15,21 @@ import (
 
 // seed は、2つのテナントとそれぞれの所属者・ノートを、スーパーユーザーで直接作る（RLS を通さずに用意するため）。
 type seed struct {
-	tenantA, tenantB, userA, userB, memberA, memberB uuid.UUID
+	tenantA, tenantB, userA, userA2, userB, memberA, memberA2, memberB uuid.UUID
 }
 
 func seedTwoTenants(t *testing.T, e *env) seed {
 	t.Helper()
 	ctx := context.Background()
-	s := seed{tenantA: uuid.New(), tenantB: uuid.New(), userA: uuid.New(), userB: uuid.New(), memberA: uuid.New(), memberB: uuid.New()}
+	s := seed{tenantA: uuid.New(), tenantB: uuid.New(), userA: uuid.New(), userA2: uuid.New(), userB: uuid.New(), memberA: uuid.New(), memberA2: uuid.New(), memberB: uuid.New()}
 	for _, q := range []struct {
 		sql  string
 		args []any
 	}{
 		{`INSERT INTO tenants (id, slug, name) VALUES ($1, 'a', 'A'), ($2, 'b', 'B')`, []any{s.tenantA, s.tenantB}},
-		{`INSERT INTO users (id, email, hashed_password) VALUES ($1, 'a@example.test', 'secret-a'), ($2, 'b@example.test', 'secret-b')`, []any{s.userA, s.userB}},
-		{`INSERT INTO memberships (tenant_id, id, user_id, access_level) VALUES ($1, $2, $3, 'admin'), ($4, $5, $6, 'admin')`, []any{s.tenantA, s.memberA, s.userA, s.tenantB, s.memberB, s.userB}},
+		{`INSERT INTO users (id, email, hashed_password) VALUES ($1, 'a@example.test', 'secret-a'), ($2, 'a2@example.test', 'secret-a2'), ($3, 'b@example.test', 'secret-b')`, []any{s.userA, s.userA2, s.userB}},
+		{`INSERT INTO memberships (tenant_id, id, user_id, access_level) VALUES ($1, $2, $3, 'admin'), ($1, $4, $5, 'office'), ($6, $7, $8, 'admin')`, []any{s.tenantA, s.memberA, s.userA, s.memberA2, s.userA2, s.tenantB, s.memberB, s.userB}},
+		{`INSERT INTO user_events (user_id, event) VALUES ($1, 'password.reset'), ($2, 'password.reset')`, []any{s.userA, s.userB}},
 		{`INSERT INTO notes (tenant_id, body, created_by_membership_id) VALUES ($1, 'note-a', $2), ($3, 'note-b', $4)`, []any{s.tenantA, s.memberA, s.tenantB, s.memberB}},
 		{`INSERT INTO auth_tokens (token_hash, kind, subject_id, user_id, expires_at) VALUES ('\x01', 'session', $1, $1, now() + interval '1 hour'), ('\x02', 'session', $2, $2, now() + interval '1 hour')`, []any{s.userA, s.userB}},
 	} {
@@ -100,13 +101,39 @@ func TestRLS(t *testing.T) {
 			if n := count(t, ctx, tx, `SELECT count(*) FROM tenants`); n != 1 {
 				t.Errorf("tenants: %d, want 1", n)
 			}
-			// users は自分と現テナントの所属者だけ（I-34）。
-			if n := count(t, ctx, tx, `SELECT count(*) FROM users`); n != 1 {
-				t.Errorf("users: %d, want 1", n)
+			// users は自分と現テナントの所属者だけ（I-34）。同じテナントの別の User は見え、別テナントの User は見えない。
+			if n := count(t, ctx, tx, `SELECT count(*) FROM users`); n != 2 {
+				t.Errorf("users: %d, want 2", n)
+			}
+			if n := count(t, ctx, tx, `SELECT count(*) FROM users WHERE email = 'b@example.test'`); n != 0 {
+				t.Errorf("別テナントの User: %d", n)
+			}
+			// user_events は本人のものだけ。
+			if n := count(t, ctx, tx, `SELECT count(*) FROM user_events`); n != 1 {
+				t.Errorf("user_events: %d, want 1", n)
 			}
 			// auth_tokens は自分のものだけ。
 			if n := count(t, ctx, tx, `SELECT count(*) FROM auth_tokens`); n != 1 {
 				t.Errorf("auth_tokens: %d, want 1", n)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("テナントなしの文脈では自分だけが見える", func(t *testing.T) {
+		err := db.UserTx(ctx, e.app, s.userA, func(tx pgx.Tx) error {
+			if n := count(t, ctx, tx, `SELECT count(*) FROM users`); n != 1 {
+				t.Errorf("users: %d, want 1（自分だけ）", n)
+			}
+			if n := count(t, ctx, tx, `SELECT count(*) FROM memberships`); n != 0 {
+				t.Errorf("memberships: %d, want 0", n)
+			}
+			// 自分の Membership の一覧（例外関数）は、自分の所属だけを返す。
+			if n := count(t, ctx, tx, `SELECT count(*) FROM fn_my_memberships()`); n != 1 {
+				t.Errorf("fn_my_memberships: %d, want 1", n)
 			}
 			return nil
 		})
@@ -150,6 +177,12 @@ func TestRLS(t *testing.T) {
 		}
 		if n := count(t, ctx, one, `SELECT count(*) FROM notes`); n != 0 {
 			t.Errorf("コミットの後: %d 行見えた", n)
+		}
+		if n := count(t, ctx, one, `SELECT count(*) FROM users`); n != 0 {
+			t.Errorf("コミットの後: users が %d 行見えた（ユーザー文脈が残った）", n)
+		}
+		if n := count(t, ctx, one, `SELECT count(*) FROM user_events`); n != 0 {
+			t.Errorf("コミットの後: user_events が %d 行見えた", n)
 		}
 		errRollback := errors.New("戻す")
 		if err := db.TenantTx(ctx, one, s.tenantA, s.userA, func(pgx.Tx) error { return errRollback }); !errors.Is(err, errRollback) {
@@ -206,7 +239,7 @@ func TestExceptionFunctions(t *testing.T) {
 		if !definer {
 			t.Errorf("%s: SECURITY DEFINER でない", name)
 		}
-		if config != "search_path=pg_catalog, public" {
+		if config != "search_path=pg_catalog, public, pg_temp" {
 			t.Errorf("%s: search_path %q", name, config)
 		}
 		if public {

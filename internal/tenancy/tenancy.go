@@ -83,7 +83,7 @@ func Invite(ctx context.Context, pool *pgxpool.Pool, jobs *river.Client[pgx.Tx],
 			actor.TenantID, actor.MembershipID, invitationID); err != nil {
 			return fmt.Errorf("監査の記録: %w", err)
 		}
-		if _, err := jobs.InsertTx(ctx, tx, mail.InvitationArgs{InvitationID: invitationID}, nil); err != nil {
+		if _, err := jobs.InsertTx(ctx, tx, mail.InvitationArgs{Version: 1, TenantID: actor.TenantID, RequesterMembershipID: actor.MembershipID, InvitationID: invitationID}, nil); err != nil {
 			return fmt.Errorf("メールのジョブ: %w", err)
 		}
 		return nil

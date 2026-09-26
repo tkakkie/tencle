@@ -44,7 +44,8 @@ type Service struct {
 func (s *Service) Login(ctx context.Context, email, password string) (token string, userID uuid.UUID, err error) {
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var hashed string
-		err := tx.QueryRow(ctx, `SELECT user_id, hashed_password FROM fn_login_lookup($1) WHERE user_id IS NOT NULL`, email).Scan(&userID, &hashed)
+		var version int32
+		err := tx.QueryRow(ctx, `SELECT user_id, hashed_password, credential_version FROM fn_login_lookup($1) WHERE user_id IS NOT NULL`, email).Scan(&userID, &hashed, &version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			verifyPassword(dummyHash, password)
 			return ErrInvalidCredentials
@@ -55,7 +56,8 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 		if !verifyPassword(hashed, password) {
 			return ErrInvalidCredentials
 		}
-		token, err = s.issue(ctx, tx, TokenSession, userID, userID, s.SessionTTL)
+		// 検証に使ったパスワードの世代をセッションに記録する。検証の後でパスワードが更新されていれば、このセッションは無効になる。
+		token, err = s.issue(ctx, tx, TokenSession, userID, userID, time.Now().Add(s.SessionTTL), &version)
 		return err
 	})
 	return token, userID, err
@@ -80,18 +82,21 @@ func (s *Service) Logout(ctx context.Context, userID uuid.UUID) error {
 	return err
 }
 
-// IssueToken は、メール送信ジョブがトークンを発行するときに使う（I-10）。
-func (s *Service) IssueToken(ctx context.Context, tx pgx.Tx, kind TokenKind, subjectID, userID uuid.UUID, ttl time.Duration) (string, error) {
-	return s.issue(ctx, tx, kind, subjectID, userID, ttl)
+// IssueToken は、メール送信ジョブがトークンを発行するときに使う（I-10）。セッションはログインでだけ発行する。
+func (s *Service) IssueToken(ctx context.Context, tx pgx.Tx, kind TokenKind, subjectID, userID uuid.UUID, expires time.Time) (string, error) {
+	if kind == TokenSession {
+		return "", errors.New("identity: セッションはログインでだけ発行する")
+	}
+	return s.issue(ctx, tx, kind, subjectID, userID, expires, nil)
 }
 
-func (s *Service) issue(ctx context.Context, tx pgx.Tx, kind TokenKind, subjectID, userID uuid.UUID, ttl time.Duration) (string, error) {
+func (s *Service) issue(ctx context.Context, tx pgx.Tx, kind TokenKind, subjectID, userID uuid.UUID, expires time.Time, version *int32) (string, error) {
 	token, hash := newToken()
 	var user *uuid.UUID
 	if userID != uuid.Nil() {
 		user = &userID
 	}
-	if _, err := tx.Exec(ctx, `SELECT fn_auth_token_save($1, $2, $3, $4, $5)`, hash, kind, subjectID, user, time.Now().Add(ttl)); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT fn_auth_token_save($1, $2, $3, $4, $5, $6)`, hash, kind, subjectID, user, expires, version); err != nil {
 		return "", fmt.Errorf("トークンの保存: %w", err)
 	}
 	return token, nil

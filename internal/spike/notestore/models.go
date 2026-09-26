@@ -21,15 +21,16 @@ type AuditLog struct {
 }
 
 type AuthToken struct {
-	ID         uuid.UUID
-	TokenHash  []byte
-	Kind       string
-	SubjectID  uuid.UUID
-	UserID     pgtype.UUID
-	ExpiresAt  pgtype.Timestamptz
-	ConsumedAt pgtype.Timestamptz
-	RevokedAt  pgtype.Timestamptz
-	CreatedAt  pgtype.Timestamptz
+	ID                uuid.UUID
+	TokenHash         []byte
+	Kind              string
+	SubjectID         uuid.UUID
+	CredentialVersion pgtype.Int4
+	UserID            pgtype.UUID
+	ExpiresAt         pgtype.Timestamptz
+	ConsumedAt        pgtype.Timestamptz
+	RevokedAt         pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
 }
 
 type Invitation struct {
@@ -74,11 +75,12 @@ type Tenant struct {
 }
 
 type User struct {
-	ID              uuid.UUID
-	Email           string
-	HashedPassword  string
-	EmailVerifiedAt pgtype.Timestamptz
-	CreatedAt       pgtype.Timestamptz
+	ID                uuid.UUID
+	Email             string
+	HashedPassword    string
+	CredentialVersion int32
+	EmailVerifiedAt   pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
 }
 
 type UserEvent struct {

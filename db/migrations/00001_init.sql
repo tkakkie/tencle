@@ -25,6 +25,8 @@ CREATE TABLE users (
     -- 正規化したメールアドレス（小文字化など）。
     email             text NOT NULL UNIQUE,
     hashed_password   text NOT NULL,
+    -- 認証の世代。パスワードの更新で1つ上げる。セッションは発行時の世代と一致するときだけ有効（ログインと更新の競合で古いセッションが残らないように）。
+    credential_version integer NOT NULL DEFAULT 0,
     email_verified_at timestamptz,
     created_at        timestamptz NOT NULL DEFAULT now()
 );
@@ -71,6 +73,8 @@ CREATE TABLE auth_tokens (
     kind        text NOT NULL CHECK (kind IN ('session', 'invitation', 'password_reset')),
     -- 招待なら招待のID、パスワード再設定とセッションなら User のID。
     subject_id  uuid NOT NULL,
+    -- セッションの発行時の User の認証の世代。セッション以外は NULL。
+    credential_version integer,
     -- セッションとパスワード再設定の持ち主。招待では受諾まで User がないので NULL。
     user_id     uuid REFERENCES users (id),
     expires_at  timestamptz NOT NULL,
@@ -176,45 +180,46 @@ GRANT INSERT ON tenants, temples, memberships, audit_logs TO tencle_tenant_creat
 GRANT INSERT (id, email, hashed_password) ON users TO tencle_tenant_creator;
 
 -- 例外関数の所有ロールの権限。例外関数の表の「読む」「書く」列だけ。
-GRANT SELECT (id, email, hashed_password, email_verified_at) ON users TO tencle_fn_reader;
+GRANT SELECT (id, email, hashed_password, credential_version, email_verified_at) ON users TO tencle_fn_reader;
 GRANT SELECT (id, slug, name) ON tenants TO tencle_fn_reader;
 GRANT SELECT (id, tenant_id, user_id, access_level, active) ON memberships TO tencle_fn_reader;
 GRANT SELECT (id, tenant_id, email, access_level, status, expires_at) ON invitations TO tencle_fn_reader;
-GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at) ON auth_tokens TO tencle_fn_reader;
-GRANT SELECT (id, email) ON users TO tencle_fn_writer;
+GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at, credential_version) ON auth_tokens TO tencle_fn_reader;
+GRANT SELECT (id, email, credential_version) ON users TO tencle_fn_writer;
 GRANT INSERT (email, hashed_password, email_verified_at) ON users TO tencle_fn_writer;
-GRANT UPDATE (hashed_password) ON users TO tencle_fn_writer;
+GRANT UPDATE (hashed_password, credential_version) ON users TO tencle_fn_writer;
 GRANT SELECT (token_hash, kind, subject_id, user_id, expires_at, consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
-GRANT INSERT (token_hash, kind, subject_id, user_id, expires_at) ON auth_tokens TO tencle_fn_writer;
+GRANT INSERT (token_hash, kind, subject_id, user_id, expires_at, credential_version) ON auth_tokens TO tencle_fn_writer;
 GRANT UPDATE (consumed_at, revoked_at) ON auth_tokens TO tencle_fn_writer;
 
 -- ここから例外関数（不変条件の「例外関数」の表）。SECURITY DEFINER で所有ロールの権限で動き、
 -- search_path を固定し、PUBLIC からの実行権限を外してアプリ用ロールだけに与える（I-1）。
+-- pg_temp は省略すると一時スキーマが最初に検索され、一時テーブルで参照先を差し替えられるので、最後に明示する。
 
-CREATE FUNCTION fn_login_lookup(p_email text, OUT user_id uuid, OUT hashed_password text)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
-AS $$ SELECT u.id, u.hashed_password FROM users u WHERE u.email = p_email $$;
+CREATE FUNCTION fn_login_lookup(p_email text, OUT user_id uuid, OUT hashed_password text, OUT credential_version integer)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
+AS $$ SELECT u.id, u.hashed_password, u.credential_version FROM users u WHERE u.email = p_email $$;
 
 CREATE FUNCTION fn_tenant_by_slug(p_slug text) RETURNS uuid
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ SELECT t.id FROM tenants t WHERE t.slug = p_slug $$;
 
 CREATE FUNCTION fn_user_by_email(p_email text) RETURNS uuid
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ SELECT u.id FROM users u WHERE u.email = p_email $$;
 
 CREATE FUNCTION fn_user_email(p_user_id uuid) RETURNS text
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ SELECT u.email FROM users u WHERE u.id = p_user_id $$;
 
 CREATE FUNCTION fn_invitation_lookup(p_invitation_id uuid,
     OUT tenant_id uuid, OUT status text, OUT expires_at timestamptz, OUT email text, OUT access_level text)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ SELECT i.tenant_id, i.status, i.expires_at, i.email, i.access_level FROM invitations i WHERE i.id = p_invitation_id $$;
 
 CREATE FUNCTION fn_my_memberships()
 RETURNS TABLE (membership_id uuid, access_level text, active boolean, tenant_id uuid, slug text, name text)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$
     SELECT m.id, m.access_level, m.active, t.id, t.slug, t.name
     FROM memberships m JOIN tenants t ON t.id = m.tenant_id
@@ -222,21 +227,23 @@ AS $$
 $$;
 
 CREATE FUNCTION fn_auth_token_check(p_token_hash bytea, p_kind text, OUT subject_id uuid, OUT user_id uuid)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$
     SELECT a.subject_id, a.user_id FROM auth_tokens a
     WHERE a.token_hash = p_token_hash AND a.kind = p_kind
       AND a.consumed_at IS NULL AND a.revoked_at IS NULL AND a.expires_at > now()
+      AND (a.kind <> 'session'
+           OR a.credential_version = (SELECT u.credential_version FROM users u WHERE u.id = a.user_id))
 $$;
 
-CREATE FUNCTION fn_auth_token_save(p_token_hash bytea, p_kind text, p_subject_id uuid, p_user_id uuid, p_expires_at timestamptz)
+CREATE FUNCTION fn_auth_token_save(p_token_hash bytea, p_kind text, p_subject_id uuid, p_user_id uuid, p_expires_at timestamptz, p_credential_version integer)
 RETURNS void
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public
-AS $$ INSERT INTO auth_tokens (token_hash, kind, subject_id, user_id, expires_at) VALUES (p_token_hash, p_kind, p_subject_id, p_user_id, p_expires_at) $$;
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
+AS $$ INSERT INTO auth_tokens (token_hash, kind, subject_id, user_id, expires_at, credential_version) VALUES (p_token_hash, p_kind, p_subject_id, p_user_id, p_expires_at, p_credential_version) $$;
 
 -- 1回だけ成立する（未消費かつ期限内の行だけを更新する）。
 CREATE FUNCTION fn_auth_token_consume(p_token_hash bytea, p_kind text) RETURNS uuid
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$
     UPDATE auth_tokens SET consumed_at = now()
     WHERE token_hash = p_token_hash AND kind = p_kind
@@ -245,18 +252,18 @@ AS $$
 $$;
 
 CREATE FUNCTION fn_revoke_user_sessions(p_user_id uuid) RETURNS void
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ UPDATE auth_tokens SET revoked_at = now() WHERE user_id = p_user_id AND kind = 'session' AND revoked_at IS NULL $$;
 
 CREATE FUNCTION fn_update_password(p_user_id uuid, p_hashed_password text) RETURNS void
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$
-    UPDATE users SET hashed_password = p_hashed_password WHERE id = p_user_id;
+    UPDATE users SET hashed_password = p_hashed_password, credential_version = credential_version + 1 WHERE id = p_user_id;
     UPDATE auth_tokens SET revoked_at = now() WHERE user_id = p_user_id AND kind = 'session' AND revoked_at IS NULL;
 $$;
 
 CREATE FUNCTION fn_create_user_by_invitation(p_email text, p_hashed_password text) RETURNS uuid
-LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ INSERT INTO users (email, hashed_password, email_verified_at) VALUES (p_email, p_hashed_password, now()) RETURNING id $$;
 
 -- 権限は所有者を付け替える前に設定する。付け替えた後は、マイグレーション用ロールは所有者でなくなり、
@@ -266,14 +273,14 @@ REVOKE EXECUTE ON FUNCTION
     app_tenant_id(), app_user_id(),
     fn_login_lookup(text), fn_tenant_by_slug(text), fn_user_by_email(text), fn_user_email(uuid),
     fn_invitation_lookup(uuid), fn_my_memberships(), fn_auth_token_check(bytea, text),
-    fn_auth_token_save(bytea, text, uuid, uuid, timestamptz), fn_auth_token_consume(bytea, text),
+    fn_auth_token_save(bytea, text, uuid, uuid, timestamptz, integer), fn_auth_token_consume(bytea, text),
     fn_revoke_user_sessions(uuid), fn_create_user_by_invitation(text, text), fn_update_password(uuid, text)
 FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app_tenant_id(), app_user_id() TO tencle_app, tencle_fn_reader, tencle_fn_writer;
 GRANT EXECUTE ON FUNCTION
     fn_login_lookup(text), fn_tenant_by_slug(text), fn_user_by_email(text), fn_user_email(uuid),
     fn_invitation_lookup(uuid), fn_my_memberships(), fn_auth_token_check(bytea, text),
-    fn_auth_token_save(bytea, text, uuid, uuid, timestamptz), fn_auth_token_consume(bytea, text),
+    fn_auth_token_save(bytea, text, uuid, uuid, timestamptz, integer), fn_auth_token_consume(bytea, text),
     fn_revoke_user_sessions(uuid), fn_create_user_by_invitation(text, text), fn_update_password(uuid, text)
 TO tencle_app;
 
@@ -286,7 +293,7 @@ ALTER FUNCTION fn_user_email(uuid) OWNER TO tencle_fn_reader;
 ALTER FUNCTION fn_invitation_lookup(uuid) OWNER TO tencle_fn_reader;
 ALTER FUNCTION fn_my_memberships() OWNER TO tencle_fn_reader;
 ALTER FUNCTION fn_auth_token_check(bytea, text) OWNER TO tencle_fn_reader;
-ALTER FUNCTION fn_auth_token_save(bytea, text, uuid, uuid, timestamptz) OWNER TO tencle_fn_writer;
+ALTER FUNCTION fn_auth_token_save(bytea, text, uuid, uuid, timestamptz, integer) OWNER TO tencle_fn_writer;
 ALTER FUNCTION fn_auth_token_consume(bytea, text) OWNER TO tencle_fn_writer;
 ALTER FUNCTION fn_revoke_user_sessions(uuid) OWNER TO tencle_fn_writer;
 ALTER FUNCTION fn_create_user_by_invitation(text, text) OWNER TO tencle_fn_writer;

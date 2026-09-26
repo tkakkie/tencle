@@ -75,6 +75,11 @@ type app struct {
 
 func newApp(t *testing.T) *app {
 	t.Helper()
+	return newAppWithLogger(t, nil)
+}
+
+func newAppWithLogger(t *testing.T, logger *slog.Logger) *app {
+	t.Helper()
 	e := newEnv(t)
 	ctx := context.Background()
 	a := &app{env: e, id: &identity.Service{Pool: e.app, SessionTTL: time.Hour}, sender: &fakeSender{}}
@@ -87,6 +92,7 @@ func newApp(t *testing.T) *app {
 		Workers:           workers,
 		FetchPollInterval: 50 * time.Millisecond,
 		FetchCooldown:     10 * time.Millisecond,
+		Logger:            logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +335,7 @@ func TestSessions(t *testing.T) {
 		var token string
 		err = pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
 			var err error
-			token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, adminUser, adminUser, time.Hour)
+			token, err = a.id.IssueToken(ctx, tx, identity.TokenPasswordReset, adminUser, adminUser, time.Now().Add(time.Hour))
 			return err
 		})
 		if err != nil {
@@ -434,13 +440,14 @@ func TestLastAdmin(t *testing.T) {
 }
 
 func TestJobErrorsHaveNoPersonalData(t *testing.T) {
-	a := newApp(t)
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	a := newAppWithLogger(t, logger)
 	ctx := context.Background()
 	admin, adminUser := a.newTenant(t, "a", "admin@example.test")
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	a.sender.fail.Store(true)
 	const canary = "canary-7f3a@example.test"
@@ -462,8 +469,33 @@ func TestJobErrorsHaveNoPersonalData(t *testing.T) {
 	if strings.Contains(errorsText, "canary") {
 		t.Errorf("River のエラーに個人情報が残った: %s", errorsText)
 	}
+	if err := a.jobs.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// ログが実際に捕まっていることを確かめてから、カナリアがないことを確かめる。
+	if !strings.Contains(logs.String(), "メールの送信に失敗") || !strings.Contains(logs.String(), "send_invitation") {
+		t.Fatalf("ワーカーと River のログが捕まっていない: %s", logs.String())
+	}
 	if strings.Contains(logs.String(), "canary") {
 		t.Errorf("ログに個人情報が残った: %s", logs.String())
 	}
 	t.Logf("River のエラー: %s", errorsText)
+}
+
+// syncBuffer は、ワーカーと River のゴルーチンから並行に書かれるログのバッファ。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
