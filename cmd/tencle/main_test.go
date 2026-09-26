@@ -18,13 +18,13 @@ func TestRun(t *testing.T) {
 		{
 			name:       "引数なしは使い方を出す",
 			args:       nil,
-			wantCode:   exitUsage,
+			wantCode:   2,
 			wantStderr: []string{"使い方: tencle"},
 		},
 		{
 			name:       "不明なサブコマンドは名前と使い方を出す",
 			args:       []string{"nope"},
-			wantCode:   exitUsage,
+			wantCode:   2,
 			wantStderr: []string{`不明なサブコマンドです: "nope"`, "使い方: tencle"},
 		},
 	}

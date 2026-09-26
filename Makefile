@@ -18,7 +18,7 @@ check: fmt vet build lint test vuln secrets actionlint zizmor
 
 # PATH の gofmt ではなく、選んだ Go に同梱の gofmt を使う。
 fmt:
-	@out=$$("$$(go env GOROOT)/bin/gofmt" -l .); \
+	@out=$$("$$(go env GOROOT)/bin/gofmt" -l .) || exit 1; \
 	if [ -n "$$out" ]; then echo "gofmt が必要なファイル:"; echo "$$out"; exit 1; fi
 
 vet:
@@ -37,14 +37,17 @@ test:
 vuln:
 	go run $(GOVULNCHECK) ./...
 
-# 履歴のすべてのコミットと、まだコミットしていない変更の両方を検査する（I-21）。
-# 追跡していない新しいファイルは、コミットした時点で履歴の検査の対象になる。
+# 履歴のすべてのコミットと、まだコミットしていない変更（ステージ済みとそれ以外）を検査する（I-21）。
+# 追跡していない新しいファイルは、ステージかコミットした時点で検査の対象になる。
 secrets:
 	go run $(GITLEAKS) git --redact --no-banner .
+	go run $(GITLEAKS) git --pre-commit --staged --redact --no-banner .
 	go run $(GITLEAKS) git --pre-commit --redact --no-banner .
 
+# actionlint は PATH にある shellcheck・pyflakes を見つけると使い、なければ黙って飛ばす。
+# 環境で結果が変わらないように、どちらも使わない。
 actionlint:
-	go run $(ACTIONLINT)
+	go run $(ACTIONLINT) -shellcheck= -pyflakes=
 
 # オンラインの検査はトークンの有無で結果が変わるので、ローカルと CI を揃えるためにオフラインで実行する。
 zizmor:
