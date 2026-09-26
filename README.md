@@ -14,6 +14,17 @@
 | [開発ワークフロー](docs/process/workflow.md) | AIと人間の役割、レビュー、CI |
 | [AGENTS.md](AGENTS.md) | AIコーディングツール向けの実装規約 |
 
+## 開発環境
+
+Docker が必要。PostgreSQL を起動する。
+
+```bash
+cp .env.example .env
+docker compose up -d --wait
+```
+
+止めるときは `docker compose down`。検査は `make check`（[AGENTS.md](AGENTS.md)）。
+
 ## 利用について
 
 - このリポジトリはソースコードと設計を公開しているが、**オープンソースライセンスは付与していない**（All rights reserved）。コード・文書の利用、複製、改変、再配布は許諾していない
