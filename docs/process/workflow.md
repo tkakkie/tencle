@@ -86,7 +86,7 @@ AIのレビューは、次の5点だけを見る。フォーマット、lint、�
 - DB：`db/migrations/**`
 - 認可・認証・テナント：`internal/authz/**`、`internal/identity/**`、`internal/tenancy/**`、`internal/platform/db/**`、`internal/erasure/**`
 - CLI：`cmd/**`
-- 文書：`docs/architecture/**`、`docs/process/**`、`docs/adr/**`
+- 文書：`docs/architecture/**`、`docs/process/**`、`docs/adr/**`、`docs/domain/**`、`docs/requirements.md`
 
 **追加した行の内容**：`//nolint`、`set_config`、`SET ROLE`、`FOR UPDATE`、`SECURITY DEFINER`、`ROW LEVEL SECURITY`、`BYPASSRLS`
 
@@ -118,7 +118,7 @@ AIのレビューは、次の5点だけを見る。フォーマット、lint、�
 
 リポジトリの設定：auto-merge を有効、マージ後のブランチ削除を有効、ワークフローの既定の権限は読み取りのみ、「Actions による PR の作成・承認」は無効、secret scanning と push protection と private vulnerability reporting を有効。
 
-緊急時（必須チェックの故障でセキュリティ修正をマージできない等）は、人間が自分で ruleset を緩め、理由・範囲・元に戻したことをIssueに記録する。
+緊急時（必須チェックの故障でセキュリティ修正をマージできない等）は、人間が自分で、故障している必須チェックだけを一時的に ruleset から外す。PR必須・承認・最後の push の承認・バイパスなしは緩めない（I-25、I-32）。理由・外したチェック・元に戻したことをIssueに記録する。
 
 ## GitHubの認証情報とサンドボックス
 
