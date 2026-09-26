@@ -13,3 +13,8 @@ ADR（Architecture Decision Record）は、設計判断の背景、決定、検�
 |---|---|---|
 | [0001](0001-record-decisions-in-adr.md) | 設計判断を ADR で記録する | 採用 |
 | [0002](0002-rebuild-in-go.md) | Go で作り直し、AIのワークフローを軽くする | 採用 |
+| [0003](0003-rls-implementation.md) | RLS の実現方式（TenantTx・例外関数・DBロール） | 採用 |
+| [0004](0004-sessions-passwords-tokens.md) | セッションとパスワード、認証トークン | 採用 |
+| [0005](0005-actor-storage.md) | Actor の保存方式 | 採用 |
+| [0006](0006-user-creation-and-invitation.md) | User の作成手順、既存の User の招待の受諾、ユーザー単位の出来事の記録先 | 採用 |
+| [0007](0007-job-errors-without-personal-data.md) | ジョブのエラーに個人情報を残さない | 採用 |
