@@ -106,6 +106,16 @@ func TestHTTP(t *testing.T) {
 	if codeOther != http.StatusNotFound || codeMissing != http.StatusNotFound {
 		t.Fatalf("別テナント: %d、存在しない: %d（どちらも 404）", codeOther, codeMissing)
 	}
+	// 同じ Cookie のまま、priest への降格の後の次のリクエストは、読み取りも書き込みも 404。
+	if err := a.id.ChangeAccessLevel(ctx, admin, adminUser, office.MembershipID, identity.LevelPriest); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := get("/t/a/notes"); code != http.StatusNotFound {
+		t.Fatalf("降格の後の読み取り: %d", code)
+	}
+	if resp := post("/t/a/notes", url.Values{"body": {"after-demote"}}); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("降格の後の書き込み: %d", resp.StatusCode)
+	}
 	// 同じ Cookie のまま、無効化の後の次のリクエストは 404。
 	if err := a.id.Deactivate(ctx, admin, adminUser, office.MembershipID); err != nil {
 		t.Fatal(err)
@@ -121,12 +131,6 @@ func TestLoginRacesPasswordReset(t *testing.T) {
 	ctx := context.Background()
 	_, userID := a.newTenant(t, "a", "admin@example.test")
 
-	// ログインの前半（照合）を実行する。
-	var oldVersion int32
-	if err := a.app.QueryRow(ctx, `SELECT credential_version FROM fn_login_lookup('admin@example.test')`).Scan(&oldVersion); err != nil {
-		t.Fatal(err)
-	}
-	// その間にパスワードが再設定される。
 	var token string
 	err := pgx.BeginFunc(ctx, a.app, func(tx pgx.Tx) error {
 		var err error
@@ -136,19 +140,19 @@ func TestLoginRacesPasswordReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.id.ResetPassword(ctx, token, "new"); err != nil {
+	// 実際の Login を、パスワードの検証の後・セッションの保存の前で止め、別の接続で再設定をコミットさせる。
+	a.id.LoginHook = func() {
+		if err := a.id.ResetPassword(ctx, token, "new"); err != nil {
+			t.Errorf("再設定: %v", err)
+		}
+	}
+	session, _, err := a.id.Login(ctx, "admin@example.test", "pw-admin@example.test")
+	a.id.LoginHook = nil
+	if err != nil {
 		t.Fatal(err)
 	}
-	// ログインの後半（古い世代でセッションを保存）。
-	if _, err := a.app.Exec(ctx, `SELECT fn_auth_token_save('\xaa', 'session', $1, $1, now() + interval '1 hour', $2)`, userID, oldVersion); err != nil {
-		t.Fatal(err)
-	}
-	var valid *uuid.UUID
-	if err := a.app.QueryRow(ctx, `SELECT user_id FROM fn_auth_token_check('\xaa', 'session')`).Scan(&valid); err != nil {
-		t.Fatal(err)
-	}
-	if valid != nil {
-		t.Fatal("古い世代のセッションが有効")
+	if _, err := a.id.Authenticate(ctx, session); !errors.Is(err, identity.ErrInvalidToken) {
+		t.Fatalf("古いパスワードで検証したセッション: %v", err)
 	}
 }
 
@@ -358,5 +362,48 @@ func TestSanitize(t *testing.T) {
 	}
 	if got := mail.Sanitize(errors.New(canary)); strings.Contains(got.Error(), canary) {
 		t.Errorf("その他のエラー: %v", got)
+	}
+}
+
+// メールアドレスは入力の境界で正規化する。大文字を混ぜて招待しても、既存の User と照合でき、ログインもできる。
+func TestEmailNormalization(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	admin, adminUser := a.newTenant(t, "a", "Admin@Example.test")
+	if _, err := tenancy.Invite(ctx, a.app, a.jobs, admin, adminUser, " Office@Example.TEST ", identity.LevelOffice); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.id.AcceptInvitation(ctx, a.sender.token(t, "office@example.test"), "pw", uuid.Nil()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.id.Login(ctx, "OFFICE@example.test", "pw"); err != nil {
+		t.Fatalf("大文字を混ぜたログイン: %v", err)
+	}
+	// 別テナントの作成で、大文字を混ぜても既存の User を再利用する。
+	if _, err := tenancy.Create(ctx, a.env.creator, a.creatorJobs, "b", "b", "OFFICE@EXAMPLE.test"); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, ctx, a.superuser, `SELECT count(*) FROM users WHERE lower(email) = 'office@example.test'`); n != 1 {
+		t.Fatalf("User の数: %d, want 1", n)
+	}
+}
+
+// パスワード設定のメールのジョブは、処理の時点で既にパスワードを設定済みなら送らない。
+func TestPasswordSetupJobSkipsWhenSet(t *testing.T) {
+	a := newApp(t)
+	ctx := context.Background()
+	_, userID := a.newTenant(t, "a", "admin@example.test")
+	worker := &mail.PasswordSetupWorker{Identity: a.id, Sender: a.sender}
+	job := &river.Job[mail.PasswordSetupArgs]{JobRow: &rivertype.JobRow{Kind: mail.PasswordSetupArgs{}.Kind()}, Args: mail.PasswordSetupArgs{UserID: userID}}
+	if err := worker.Work(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body := <-a.sender.box("admin@example.test"):
+		t.Fatalf("設定済みなのに送った: %s", body)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if n := count(t, ctx, a.superuser, `SELECT count(*) FROM auth_tokens WHERE kind = 'password_reset' AND consumed_at IS NULL`); n != 0 {
+		t.Fatalf("トークンを発行した: %d", n)
 	}
 }

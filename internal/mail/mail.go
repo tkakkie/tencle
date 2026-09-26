@@ -66,16 +66,30 @@ type PasswordSetupWorker struct {
 
 func (w *PasswordSetupWorker) Work(ctx context.Context, job *river.Job[PasswordSetupArgs]) error {
 	var to, token string
+	passwordSet := false
 	err := pgx.BeginFunc(ctx, w.Identity.Pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT fn_user_email($1)`, job.Args.UserID).Scan(&to); err != nil {
+		var email *string
+		var set *bool
+		if err := tx.QueryRow(ctx, `SELECT email, password_set FROM fn_user_email($1)`, job.Args.UserID).Scan(&email, &set); err != nil {
 			return fmt.Errorf("宛先の取得: %w", err)
 		}
+		// 処理の時点で、User がないか、既にパスワードを設定していれば送らない（遅れて実行・再試行されたジョブで、
+		// 使っている人にパスワード設定のトークンを送らないため）。
+		if email == nil || (set != nil && *set) {
+			passwordSet = true
+			return nil
+		}
+		to = *email
 		var err error
 		token, err = w.Identity.IssueToken(ctx, tx, identity.TokenPasswordReset, job.Args.UserID, job.Args.UserID, time.Now().Add(72*time.Hour))
 		return err
 	})
 	if err != nil {
 		return Sanitize(err)
+	}
+	if passwordSet {
+		slog.InfoContext(ctx, "パスワード設定のメールを送らない", "job_kind", job.Kind, "user_id", job.Args.UserID.String())
+		return nil
 	}
 	return send(ctx, w.Sender, job.Kind, to, "パスワードの設定", "/password/reset?token="+token)
 }

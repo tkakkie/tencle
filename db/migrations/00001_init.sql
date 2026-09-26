@@ -124,7 +124,7 @@ CREATE TABLE user_events (
 -- RLS（I-2）。FORCE でテーブル所有者にも適用する。
 ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenants_current ON tenants USING (id = app_tenant_id());
+CREATE POLICY tenants_current ON tenants USING (id = app_tenant_id()) WITH CHECK (id = app_tenant_id());
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users FORCE ROW LEVEL SECURITY;
@@ -208,9 +208,10 @@ CREATE FUNCTION fn_user_by_email(p_email text) RETURNS uuid
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
 AS $$ SELECT u.id FROM users u WHERE u.email = p_email $$;
 
-CREATE FUNCTION fn_user_email(p_user_id uuid) RETURNS text
+-- パスワード設定のメールのジョブが、処理の時点でまだ未設定かを確かめられるように、設定済みかどうかも返す（ハッシュは返さない）。
+CREATE FUNCTION fn_user_email(p_user_id uuid, OUT email text, OUT password_set boolean)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp
-AS $$ SELECT u.email FROM users u WHERE u.id = p_user_id $$;
+AS $$ SELECT u.email, u.hashed_password <> '!' FROM users u WHERE u.id = p_user_id $$;
 
 CREATE FUNCTION fn_invitation_lookup(p_invitation_id uuid,
     OUT tenant_id uuid, OUT status text, OUT expires_at timestamptz, OUT email text, OUT access_level text)

@@ -25,6 +25,7 @@ var ErrSlugTaken = errors.New("tenancy: その slug は使われています")
 // pool はテナント作成用ロールの接続。
 func Create(ctx context.Context, pool *pgxpool.Pool, jobs *river.Client[pgx.Tx], slug, name, adminEmail string) (tenantID uuid.UUID, err error) {
 	tenantID = uuid.New()
+	adminEmail = identity.NormalizeEmail(adminEmail)
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name) VALUES ($1, $2, $3)`, tenantID, slug, name); err != nil {
 			var pgErr *pgconn.PgError
@@ -74,6 +75,7 @@ func Invite(ctx context.Context, pool *pgxpool.Pool, jobs *river.Client[pgx.Tx],
 		return uuid.Nil(), identity.ErrForbidden
 	}
 	invitationID := uuid.New()
+	email = identity.NormalizeEmail(email)
 	err := db.TenantTx(ctx, pool, actor.TenantID, userID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO invitations (tenant_id, id, email, access_level, expires_at) VALUES ($1, $2, $3, $4, now() + interval '7 days')`,
 			actor.TenantID, invitationID, email, level); err != nil {

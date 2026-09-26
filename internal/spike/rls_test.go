@@ -188,8 +188,10 @@ func TestRLS(t *testing.T) {
 		if err := db.TenantTx(ctx, one, s.tenantA, s.userA, func(pgx.Tx) error { return errRollback }); !errors.Is(err, errRollback) {
 			t.Fatal(err)
 		}
-		if n := count(t, ctx, one, `SELECT count(*) FROM notes`); n != 0 {
-			t.Errorf("ロールバックの後: %d 行見えた", n)
+		for _, table := range []string{"notes", "users", "auth_tokens", "user_events"} {
+			if n := count(t, ctx, one, "SELECT count(*) FROM "+table); n != 0 {
+				t.Errorf("ロールバックの後: %s が %d 行見えた", table, n)
+			}
 		}
 	})
 

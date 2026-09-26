@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"uuid"
 
@@ -38,6 +39,13 @@ type Service struct {
 	SessionTTL time.Duration
 	// AuditHook は、スパイクで監査の書き込みの失敗を起こすためだけのもの。
 	AuditHook func() error
+	// LoginHook は、スパイクでログインの照合と保存の間に割り込むためだけのもの。
+	LoginHook func()
+}
+
+// NormalizeEmail は、メールアドレスを保存・比較する形にする。入力の境界（ログイン・招待・テナントの作成）で必ず通す。
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 // Login は、パスワードを確かめてセッションを発行する。存在しないメールアドレスでも同じだけ時間をかける（I-34）。
@@ -45,7 +53,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var hashed string
 		var version int32
-		err := tx.QueryRow(ctx, `SELECT user_id, hashed_password, credential_version FROM fn_login_lookup($1) WHERE user_id IS NOT NULL`, email).Scan(&userID, &hashed, &version)
+		err := tx.QueryRow(ctx, `SELECT user_id, hashed_password, credential_version FROM fn_login_lookup($1) WHERE user_id IS NOT NULL`, NormalizeEmail(email)).Scan(&userID, &hashed, &version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			verifyPassword(dummyHash, password)
 			return ErrInvalidCredentials
@@ -55,6 +63,9 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 		}
 		if !verifyPassword(hashed, password) {
 			return ErrInvalidCredentials
+		}
+		if s.LoginHook != nil {
+			s.LoginHook()
 		}
 		// 検証に使ったパスワードの世代をセッションに記録する。検証の後でパスワードが更新されていれば、このセッションは無効になる。
 		token, err = s.issue(ctx, tx, TokenSession, userID, userID, time.Now().Add(s.SessionTTL), &version)

@@ -86,6 +86,12 @@ func tenantRoute(id *identity.Service, next func(http.ResponseWriter, *http.Requ
 			http.NotFound(w, r)
 			return
 		}
+		// スパイクでは、ノートは office 以上だけとする。priest 段階の範囲外は 404（I-7）。
+		// 本番では、ハンドラではなく Actor を受け取るユースケースで認可する（I-6・I-23）。
+		if m.Level == identity.LevelPriest {
+			http.NotFound(w, r)
+			return
+		}
 		if err != nil {
 			http.Error(w, "エラー", http.StatusInternalServerError)
 			return

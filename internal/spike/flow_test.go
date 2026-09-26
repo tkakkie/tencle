@@ -115,7 +115,7 @@ func (a *app) newTenant(t *testing.T, slug, email string) (identity.Membership, 
 	if _, err := tenancy.Create(ctx, a.env.creator, a.creatorJobs, slug, slug, email); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.id.ResetPassword(ctx, a.sender.token(t, email), "pw-"+email); err != nil {
+	if err := a.id.ResetPassword(ctx, a.sender.token(t, identity.NormalizeEmail(email)), "pw-"+email); err != nil {
 		t.Fatal(err)
 	}
 	_, userID, err := a.id.Login(ctx, email, "pw-"+email)
@@ -472,9 +472,13 @@ func TestJobErrorsHaveNoPersonalData(t *testing.T) {
 	if err := a.jobs.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// ログが実際に捕まっていることを確かめてから、カナリアがないことを確かめる。
-	if !strings.Contains(logs.String(), "メールの送信に失敗") || !strings.Contains(logs.String(), "send_invitation") {
-		t.Fatalf("ワーカーと River のログが捕まっていない: %s", logs.String())
+	// ワーカーのログと、River 自身の失敗のログ（v0.47 の job_executor の「Job errored」）が実際に捕まっていることを
+	// 確かめてから、カナリアがないことを確かめる。
+	if !strings.Contains(logs.String(), "メールの送信に失敗") {
+		t.Fatalf("ワーカーのログが捕まっていない: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "Job errored") {
+		t.Fatalf("River のログが捕まっていない: %s", logs.String())
 	}
 	if strings.Contains(logs.String(), "canary") {
 		t.Errorf("ログに個人情報が残った: %s", logs.String())
