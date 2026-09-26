@@ -20,7 +20,7 @@
   - `TenantTx(ctx, pool, tenantID, userID, fn)`：テナント所有データへのクエリはこの中でだけ実行する
   - `UserTx(ctx, pool, userID, fn)`：テナントを確定する前（ログイン済み・テナントなしのルート）
   - `SetContext(ctx, tx, tenantID, userID)`：実行中のトランザクションの文脈を設定し直す。例外関数で始めた処理を**同じトランザクションのまま**、招待の受諾ではテナント文脈に、パスワード再設定ではユーザー文脈に切り替えるときにだけ使う。呼び出し元は認証モジュールに限り、自作の静的解析で検査する
-- ポリシーは、テナント所有のテーブルでは `USING` と `WITH CHECK` の両方を `tenant_id = app_tenant_id()` にする。`users` は「自分か、現テナントの所属者」、`auth_tokens` は「自分のもの」だけを見せる
+- ポリシーは、テナント所有のテーブルでは `USING` と `WITH CHECK` の両方を `tenant_id = app_tenant_id()` にする（`tenants` は `id = app_tenant_id()`）。`users` は「自分か、現テナントの所属者」、`auth_tokens` は「自分のもの」だけを見せる
 
 ### DB ロールと作成手順
 
@@ -37,6 +37,7 @@
 
 ### 例外関数
 
+- 例外関数の所有ロールの列の権限は、表の「読む」「書く」列に、`UPDATE` の条件や計算に使う列（PostgreSQL では `SELECT` 権限が要る）も含めて、表と一致させる。所有ロールの列の権限を表と照合するテストは #7 で作る
 - 名前は `fn_` で始め、`LANGUAGE sql`・`SECURITY DEFINER`・`SET search_path = pg_catalog, public, pg_temp` とする。`pg_temp` を省略すると一時スキーマが最初に検索され、一時テーブルで参照先を差し替えられる（PostgreSQL の公式文書）ので、最後に明示する。スキーマ `public` にはマイグレーション用ロールしか `CREATE` を持たない（アプリ用ロールには与えない）
 - 所有者は、読み取りだけなら `tencle_fn_reader`、書き込みを伴うなら `tencle_fn_writer` にする。所有ロールには、例外関数の表の「読む」「書く」列だけの権限を与える
 - 該当がないとき、`OUT` 引数の関数は **`NULL` の行**を、スカラーを返す関数は `NULL` を返す。呼び出し側のクエリは `WHERE <列> IS NOT NULL` で絞り、「該当なし」を `pgx.ErrNoRows` として受ける（sqlc の生成コードでも同じ形で確かめた）
