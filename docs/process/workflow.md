@@ -98,11 +98,11 @@ AIのレビューは、次の5点だけを見る。フォーマット、lint、�
 
 | 分類 | チェック |
 |---|---|
-| Go | フォーマット（gofmt）、`go vet`、golangci-lint（自作の静的解析を含む）、`go test -race`（本物のPostgreSQL、アプリ用ロール） |
+| Go | フォーマット（gofmt）、`go vet`、ビルド（`go build`）、golangci-lint（自作の静的解析を含む）、`go test -race`（本物のPostgreSQL、アプリ用ロール） |
 | 生成物 | sqlc・templ を生成し直して差分がないこと |
 | DB | squawk（マイグレーション） |
 | 依存 | govulncheck |
-| リポジトリ | gitleaks、actionlint、zizmor |
+| リポジトリ | gitleaks、actionlint、zizmor、Docker Compose の構成（`docker compose config`） |
 
 - PRのコードを実行するジョブは `permissions` を読み取りのみにし、`actions/checkout` は `persist-credentials: false` にし、secrets を使わない（I-39）
 - 必須チェックのジョブには `if:` やパスの絞り込みを付けない（スキップが成功扱いになるため）
