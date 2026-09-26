@@ -66,4 +66,4 @@ zizmor-version:
 
 # 開発環境の構成が壊れていないかを、架空の値（.env.example）で展開して確かめる。
 compose:
-	docker compose --env-file .env.example config --quiet
+	docker compose -f compose.yaml --env-file .env.example config --quiet
